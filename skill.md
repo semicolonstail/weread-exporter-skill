@@ -32,28 +32,37 @@ Example: If URL is `https://weread.qq.com/web/bookDetail/08232ac0720befa90825d88
 ### Command Syntax
 
 ```bash
-# Basic usage - export to epub and pdf
+# ⚠️ First time use REQUIRES --force-login parameter!
+python -m weread_exporter -b <book_id> -o epub -o pdf --force-login
+
+# Subsequent uses (already logged in before)
 python -m weread_exporter -b <book_id> -o epub -o pdf
 
-# Export to specific formats
-python -m weread_exporter -b <book_id> -o epub -o pdf -o mobi
+# Export to specific formats (first time)
+python -m weread_exporter -b <book_id> -o epub -o pdf -o mobi --force-login
 
-# Headless mode (no browser window)
-python -m weread_exporter -b <book_id> -o epub --headless
+# Headless mode (first time - requires --force-login)
+python -m weread_exporter -b <book_id> -o epub --headless --force-login
 
-# With custom login timeout (default is 60 seconds)
-python -m weread_exporter -b <book_id> -o epub --login-timeout 120
+# With custom login timeout (first time)
+python -m weread_exporter -b <book_id> -o epub --login-timeout 120 --force-login
 
 # With custom chapter loading timeout
 python -m weread_exporter -b <book_id> -o epub --load-timeout 120
 ```
+
+**⚠️ IMPORTANT:**
+- **First time use MUST include `--force-login` parameter**, otherwise login won't be triggered
+- First run will open a browser with WeChat QR code for scanning
+- After successful login, session is saved for future use
+- Subsequent runs don't need `--force-login` (unless cache expires)
 
 ### Parameters
 
 - `-b, --book-id` (required): The WeRead book ID
 - `-o, --output` (optional): Output format(s) - epub, pdf, mobi, txt, md. Default: epub, pdf
 - `--headless` (optional): Run in headless mode (no browser window)
-- `--force-login` (optional): Force login first. Default: true
+- `--force-login` (optional): **Required for first-time use**. Triggers login flow. Default: false
 - `--login-timeout` (optional): Login QR code timeout in seconds. Default: 60
 - `--load-timeout` (optional): Load chapter page timeout in seconds. Default: 60
 - `--load-interval` (optional): Load chapter page interval in seconds. Default: 30
