@@ -182,7 +182,8 @@ class WeReadWebPage(object):
         force_login=False,
         use_default_profile=False,
         mock_user_agent=False,
-        proxy_server=None
+        proxy_server=None,
+        login_timeout=60,
     ):
         logging.info("[%s] Launch url %s" % (self.__class__.__name__, self._home_url))
         chrome = self._check_chrome()
@@ -283,7 +284,7 @@ class WeReadWebPage(object):
         await self._page.goto(self._home_url)
         # await self.wait_for_selector("div.readerFooter a")
         if force_login:
-            await self.login()
+            await self.login(timeout=login_timeout)
         if self._cookie:
             await self.wait_for_avatar()
         self._page.on("console", self.handle_log)
@@ -351,7 +352,7 @@ class WeReadWebPage(object):
                 }
             )
 
-    async def login(self):
+    async def login(self, timeout=60):
         selectors = [
             "button.navBar_link_Login",
             "div.readerTopBar_right button.actionItem",
@@ -369,18 +370,46 @@ class WeReadWebPage(object):
             await self._page.click(selector)
             script = "document.querySelector('div.menu_container img.wr_avatar_img')"
             time0 = time.time()
-            while time.time() - time0 < 300:
-                logging.info("[%s] Waiting for login" % self.__class__.__name__)
-                await asyncio.sleep(10)
+
+            # Better user prompt for login
+            print("\n" + "=" * 60)
+            print("📱 WeChat Login Required")
+            print("=" * 60)
+            print("1. A QR code is displayed in the browser window")
+            print("2. Open WeChat on your mobile phone")
+            print("3. Scan the QR code to log in")
+            print("4. Waiting for you to scan...")
+            print(f"⏱️  Timeout: {timeout} seconds")
+            print("=" * 60 + "\n")
+
+            while time.time() - time0 < timeout:
+                elapsed = int(time.time() - time0)
+                remaining = timeout - elapsed
+                if elapsed % 10 == 0 and elapsed > 0:
+                    logging.info(
+                        "[%s] Waiting for login... (%d seconds remaining)"
+                        % (self.__class__.__name__, remaining)
+                    )
+                await asyncio.sleep(1)
                 result = await self._page.evaluate(script)
                 if not result:
                     continue
-                logging.info("[%s] Login success" % self.__class__.__name__)
+                logging.info("[%s] Login success!" % self.__class__.__name__)
+                print("\n✅ Login successful! Continuing export...\n")
                 await self._update_cookie()
                 self._save_cookie()
                 return True
             else:
-                raise RuntimeError("Login timeout")
+                print("\n" + "=" * 60)
+                print("❌ Login Timeout")
+                print("=" * 60)
+                print(f"The login process timed out after {timeout} seconds.")
+                print("Please:")
+                print("  1. Check if the browser window is visible")
+                print("  2. Make sure you have WeChat installed on your phone")
+                print("  3. Try again with a longer timeout: --login-timeout 120")
+                print("=" * 60 + "\n")
+                raise RuntimeError(f"Login timeout after {timeout} seconds")
         return False
 
     async def _get_from_cache_or_server(self, url, headers=None):
@@ -566,9 +595,36 @@ class WeReadWebPage(object):
             result = await self._page.evaluate(script)
             if not result:
                 raise RuntimeError("Wait for creating markdown timeout")
+
+        # Check if content indicates login is required
+        if not result or len(result.strip()) < 10:
+            raise utils.LoginRequiredError("Empty content - login required")
+
+        # Check for common login/permission prompts in Chinese
+        login_prompts = [
+            "登录后阅读",
+            "请登录",
+            "登录后查看",
+            "购买后阅读",
+            "订阅后阅读",
+            "本章为付费章节",
+            "试读结束",
+        ]
+        for prompt in login_prompts:
+            if prompt in result:
+                logging.warning(
+                    "[%s] Detected login prompt in content: %s"
+                    % (self.__class__.__name__, prompt)
+                )
+                raise utils.LoginRequiredError(f"Content contains login prompt: {prompt}")
+
         return result
 
     async def _check_next_page(self):
+        # Track consecutive pages to detect infinite loops
+        consecutive_next_page = 0
+        max_consecutive_pages = 50  # Safety limit
+
         while True:
             try:
                 await self.wait_for_selector(
@@ -580,7 +636,22 @@ class WeReadWebPage(object):
             result = await self._page.evaluate(
                 "document.getElementsByClassName('readerFooter_button')[0].innerText;"
             )
+
+            # Check for login prompts in button text
+            if result.startswith("登录"):
+                raise utils.LoginRequiredError()
+
+            # Check for purchase/subscription prompts
+            if any(keyword in result for keyword in ["购买", "订阅", "付费", "会员"]):
+                raise utils.LoginRequiredError(f"Chapter requires purchase/subscription: {result}")
+
             if result == "下一页":
+                consecutive_next_page += 1
+                if consecutive_next_page > max_consecutive_pages:
+                    raise utils.LoginRequiredError(
+                        f"Exceeded maximum page count ({max_consecutive_pages}) - "
+                        "likely stuck in a loop or hitting paywall"
+                    )
                 logging.info("[%s] Go to next page" % self.__class__.__name__)
                 await self._page.evaluate(
                     r"canvasContextHandler.data.markdown += '\n\n';"
@@ -590,8 +661,6 @@ class WeReadWebPage(object):
                 await asyncio.sleep(1)
             elif result == "下一章":
                 break
-            elif result.startswith("登录"):
-                raise utils.LoginRequiredError()
             else:
                 raise NotImplementedError(result)
 
@@ -611,7 +680,7 @@ class WeReadWebPage(object):
         try:
             await self._check_next_page()
         except utils.LoginRequiredError:
-            await self.login()
+            await self.login(timeout=60)
             return await self.goto_chapter(chapter_id, timeout=timeout)
 
     async def clear_cache(self):

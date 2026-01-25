@@ -57,6 +57,7 @@ def main():
         print("                           Default: epub")
         print("  headless      (optional)  Run chrome in headless mode (default: false)")
         print("  force_login   (optional)  Force login first (default: false)")
+        print("  login_timeout (optional)  Login QR code timeout in seconds (default: 60)")
         print("  load_timeout  (optional)  Load chapter timeout in seconds (default: 60)")
         print("  load_interval (optional)  Load chapter interval in seconds (default: 30)")
         print()
@@ -107,6 +108,9 @@ def skill_main(input_data):
 
     if input_data.get("load_interval"):
         cmd_args.extend(["--load-interval", str(input_data["load_interval"])])
+
+    if input_data.get("login_timeout"):
+        cmd_args.extend(["--login-timeout", str(input_data["login_timeout"])])
 
     # Execute the exporter
     print(f"Exporting WeRead book: {book_id}")

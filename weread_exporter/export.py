@@ -316,6 +316,11 @@ class WeReadExporter(object):
         if not os.path.isfile(self._cover_image_path):
             await self.save_cover_image()
 
+        # Track previous chapter content to detect infinite loops
+        prev_chapter_hash = None
+        duplicate_count = 0
+        max_duplicates = 2
+
         for index, chapter in enumerate(meta_data["chapters"]):
             logging.info(
                 "[%s] Check chapter %s/%s"
@@ -324,6 +329,8 @@ class WeReadExporter(object):
 
             file_path = self._make_chapter_path(index, chapter["id"])
             if os.path.isfile(file_path) and os.path.getsize(file_path) > 3:
+                # Reset duplicate counter on successful chapters
+                duplicate_count = 0
                 continue
             logging.info(
                 "[%s] File %s not exist" % (self.__class__.__name__, file_path)
@@ -352,6 +359,12 @@ class WeReadExporter(object):
                     raise utils.LoadChapterFailedError()
                 except KeyboardInterrupt as ex:
                     raise ex
+                except utils.LoginRequiredError:
+                    logging.warning(
+                        "[%s] Chapter %s requires login, re-authenticating..."
+                        % (self.__class__.__name__, chapter["title"])
+                    )
+                    raise
                 except:
                     logging.exception(
                         "[%s] Go to chapter %s failed"
@@ -365,6 +378,25 @@ class WeReadExporter(object):
                 )
 
             markdown = await self._page.get_markdown()
+
+            # Detect duplicate content to prevent infinite loops
+            import hashlib
+            current_hash = hashlib.md5(markdown.encode('utf-8')).hexdigest()
+            if prev_chapter_hash == current_hash:
+                duplicate_count += 1
+                logging.warning(
+                    "[%s] Duplicate content detected (count: %d/%d)"
+                    % (self.__class__.__name__, duplicate_count, max_duplicates)
+                )
+                if duplicate_count >= max_duplicates:
+                    raise utils.LoginRequiredError(
+                        "Detected repeated identical chapters - likely hitting paywall or not logged in. "
+                        "Please check your login status or verify that you have access to this book."
+                    )
+            else:
+                duplicate_count = 0
+                prev_chapter_hash = current_hash
+
             logging.info(
                 "[%s] Export chapter %s to %s"
                 % (self.__class__.__name__, chapter["title"], file_path)

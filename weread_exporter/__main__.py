@@ -61,6 +61,12 @@ async def async_main():
         "--force-login", help="force login first", action="store_true", default=False
     )
     parser.add_argument(
+        "--login-timeout",
+        help="login QR code timeout in seconds (default: 60)",
+        type=int,
+        default=60,
+    )
+    parser.add_argument(
         "--use-default-profile",
         help="use default profile",
         action="store_true",
@@ -117,6 +123,7 @@ async def async_main():
                     use_default_profile=args.use_default_profile,
                     mock_user_agent=args.mock_user_agent,
                     proxy_server=args.proxy_server,
+                    login_timeout=args.login_timeout,
                 )
             except RuntimeError:
                 logging.exception("Launch book %s home page failed" % book_id)
