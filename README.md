@@ -24,14 +24,14 @@
 
 **macOS / Linux:**
 ```bash
-git clone https://github.com/semicolonstail/weread-exporter.git
+git clone https://github.com/semicolonstail/weread-exporter-skill.git
 cd weread-exporter
 ./install.sh
 ```
 
 **Windows:**
 ```cmd
-git clone https://github.com/semicolonstail/weread-exporter.git
+git clone https://github.com/semicolonstail/weread-exporter-skill.git
 cd weread-exporter
 install.bat
 ```
@@ -96,7 +96,7 @@ python -m weread_exporter -b <book_id> -o epub --load-timeout 120
 
 ```bash
 # 克隆仓库
-git clone https://github.com/semicolonstail/weread-exporter.git
+git clone https://github.com/semicolonstail/weread-exporter-skill.git
 cd weread-exporter
 
 # 安装开发依赖
@@ -143,7 +143,7 @@ pytest
 ## 📮 联系方式
 
 - 作者：xujinmeng
-- 项目链接：[https://github.com/semicolonstail/weread-exporter](https://github.com/semicolonstail/weread-exporter)
+- 项目链接：[https://github.com/semicolonstail/weread-exporter-skill](https://github.com/semicolonstail/weread-exporter-skill)
 
 ---
 
