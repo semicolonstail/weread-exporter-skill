@@ -6,6 +6,11 @@
 
 > 微信读书书籍导出工具 - 支持导出为 EPUB、PDF、MOBI、TXT、Markdown 格式
 
+**关键词**：微信读书导出、weread exporter、微信读书下载、epub转换、pdf转换、kindle、claude code skill、书籍导出、电子书转换
+
+[![GitHub stars](https://img.shields.io/github/stars/semicolonstail/weread-exporter-skill?style=social)](https://github.com/semicolonstail/weread-exporter-skill/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/semicolonstail/weread-exporter-skill?style=social)](https://github.com/semicolonstail/weread-exporter-skill/network/members)
+
 ## ✨ 特性
 
 - 📚 **多格式导出**：支持 EPUB、PDF、MOBI、TXT、Markdown 格式

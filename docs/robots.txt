@@ -1,0 +1,6 @@
+# robots.txt for weread-exporter-skill
+
+User-agent: *
+Allow: /
+
+Sitemap: https://semicolonstail.github.io/weread-exporter-skill/sitemap.xml
