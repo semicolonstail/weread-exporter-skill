@@ -1,0 +1,6 @@
+{
+  "weread-exporter": {
+    "command": "python3",
+    "args": [".claude-plugin/mcp_server.py"]
+  }
+}
