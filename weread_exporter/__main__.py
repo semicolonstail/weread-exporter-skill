@@ -110,6 +110,31 @@ async def async_main():
         if not await page.check_valid():
             logging.warning("Book %s status is invalid, stop exporting" % book_id)
             continue
+
+        # Check login status before launching browser
+        if not args.force_login and not page._cookie.get("wr_vid"):
+            print("\n" + "=" * 60)
+            print("⚠️  Login Required")
+            print("=" * 60)
+            print("No login session found. This is likely your first time using the tool.")
+            print()
+            print("To use this tool, you need to:")
+            print("  1. Add the --force-login parameter to trigger login")
+            print("  2. Run: python -m weread_exporter -b %s -o epub --force-login" % book_id)
+            print()
+            print("Your first run will:")
+            print("  - Open a browser window")
+            print("  - Display a WeChat QR code")
+            print("  - Wait for you to scan with WeChat mobile app")
+            print("  - Save your login session for future use")
+            print()
+            print("After first login, you can omit --force-login parameter.")
+            print("=" * 60 + "\n")
+            logging.error("No login session found. Please use --force-login parameter for first-time use.")
+            return -1
+        elif not args.force_login:
+            logging.info("Found existing login session (wr_vid=%s)" % page._cookie.get("wr_vid"))
+
         save_path = os.path.join("cache", book_id)
         output_dir = "output"
         if not os.path.isdir(output_dir):
