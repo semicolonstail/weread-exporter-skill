@@ -44,15 +44,19 @@ Export the WeRead book with ID 08232ac0720befa90825d88 to epub and pdf formats
 
 ### 命令行直接使用
 
+在同一个工作目录运行登录和导出。首次使用或会话过期时扫码。
+
 ```bash
+python -m weread_exporter.login
+
 # 导出为 epub
-python -m weread_exporter -b <book_id> -o epub
+python -m weread_exporter -b 'BOOK_URL_OR_ID' -o epub
 
 # 导出为多种格式
-python -m weread_exporter -b <book_id> -o epub -o pdf -o txt
+python -m weread_exporter -b 'BOOK_URL_OR_ID' -o epub -o pdf -o txt
 
 # 无头模式（不显示浏览器窗口）
-python -m weread_exporter -b <book_id> -o epub --headless
+python -m weread_exporter -b 'BOOK_URL_OR_ID' -o epub --headless
 ```
 
 ---
@@ -63,7 +67,7 @@ python -m weread_exporter -b <book_id> -o epub --headless
 2. 搜索目标书籍
 3. 打开书籍详情页
 4. URL 格式：`https://weread.qq.com/web/bookDetail/08232ac0720befa90825d88`
-5. 书籍 ID 就是 `/web/bookDetail/` 后面的部分
+5. 把书籍详情页或阅读页链接直接传给 `-b`，也可传入书籍 ID
 
 ---
 
@@ -81,7 +85,7 @@ python -m weread_exporter -b <book_id> -o epub --headless
 
 ## 输出位置
 
-导出的文件保存在 `./output/` 目录
+电子书文件写入 `output/`，逐章 Markdown 写入 `cache/web-reader/BOOK_ID/chapters/`。
 
 ---
 

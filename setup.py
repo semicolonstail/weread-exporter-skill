@@ -33,6 +33,7 @@ setuptools.setup(
     long_description_content_type="text/markdown",
     url="https://github.com/drunkdream/weread-exporter",
     packages=find_packages(),
+    package_data={"weread_exporter": ["*.css", "*.js", "bin/linux/*", "bin/win32/*"]},
     python_requires=">=3.7",
     install_requires=REQUIREMENTS,
     extras_require={},

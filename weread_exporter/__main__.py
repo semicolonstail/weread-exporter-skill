@@ -12,25 +12,13 @@ def patch_windows():
         os.add_dll_directory(bin_path)
 
 
-def patch_generateRequestHash():
-    from pyppeteer import network_manager
-
-    orig_generateRequestHash = network_manager.generateRequestHash
-
-    def patched_generateRequestHash(request):
-        request["headers"].pop("Origin", None)
-        return orig_generateRequestHash(request)
-
-    network_manager.generateRequestHash = patched_generateRequestHash
-
-
 async def async_main():
     from . import export, utils, webpage
 
     parser = argparse.ArgumentParser(
         prog="weread-exporter", description="WeRead book export cmdline tool"
     )
-    parser.add_argument("-b", "--book-id", help="book id", required=True)
+    parser.add_argument("-b", "--book-id", help="book ID or official WeRead URL", required=True)
     parser.add_argument(
         "-o",
         "--output-format",
@@ -68,7 +56,7 @@ async def async_main():
     )
     parser.add_argument(
         "--use-default-profile",
-        help="use default profile",
+        help="legacy option, unsupported by current Chrome",
         action="store_true",
         default=False,
     )
@@ -83,6 +71,12 @@ async def async_main():
         help="http proxy server, e.g. http://127.0.0.1:8888",
     )
     args = parser.parse_args()
+    if args.use_default_profile:
+        parser.error("Chrome requires a separate profile for browser automation. Omit --use-default-profile.")
+    if args.force_login and args.headless:
+        parser.error("--force-login requires a visible Chrome window.")
+    if args.load_timeout <= 0 or args.load_interval < 0 or args.login_timeout <= 0:
+        parser.error("timeouts must be positive and the load interval cannot be negative")
     args.output_format = args.output_format or ["epub"]
     if "mobi" in args.output_format and "epub" not in args.output_format:
         args.output_format.append("epub")
@@ -94,76 +88,31 @@ async def async_main():
         with open(args.css_file) as fp:
             extra_css = fp.read()
 
-    if "_" in args.book_id:
-        # book list id
+    if "_" in args.book_id and "://" not in args.book_id:
         book_list = [it["id"] for it in await utils.get_book_list(args.book_id)]
     else:
         book_list = [args.book_id]
 
-    for book_id in book_list:
-        logging.info("Exporting book %s" % book_id)
-        page = webpage.WeReadWebPage(
-            book_id,
-            cookie_path=os.path.join("cache", "cookie.txt"),
-            webcache_path="cache",
-        )
-        if not await page.check_valid():
-            logging.warning("Book %s status is invalid, stop exporting" % book_id)
-            continue
+    for value in book_list:
+        book_id = webpage.normalize_book_id(value)
+        logging.info("Exporting book %s", book_id)
+        page = webpage.WeReadWebPage(book_id)
+        try:
+            await page.launch(
+                headless=args.headless,
+                force_login=args.force_login,
+                mock_user_agent=args.mock_user_agent,
+                proxy_server=args.proxy_server,
+                login_timeout=args.login_timeout,
+            )
+            save_path = os.path.join("cache", "web-reader", book_id)
+            exporter = export.WeReadExporter(page, save_path)
+            await exporter.export_markdown(args.load_timeout, args.load_interval)
+        finally:
+            await page.close()
 
-        # Check login status before launching browser
-        if not args.force_login and not page._cookie.get("wr_vid"):
-            print("\n" + "=" * 60)
-            print("⚠️  Login Required")
-            print("=" * 60)
-            print("No login session found. This is likely your first time using the tool.")
-            print()
-            print("To use this tool, you need to:")
-            print("  1. Add the --force-login parameter to trigger login")
-            print("  2. Run: python -m weread_exporter -b %s -o epub --force-login" % book_id)
-            print()
-            print("Your first run will:")
-            print("  - Open a browser window")
-            print("  - Display a WeChat QR code")
-            print("  - Wait for you to scan with WeChat mobile app")
-            print("  - Save your login session for future use")
-            print()
-            print("After first login, you can omit --force-login parameter.")
-            print("=" * 60 + "\n")
-            logging.error("No login session found. Please use --force-login parameter for first-time use.")
-            return -1
-        elif not args.force_login:
-            logging.info("Found existing login session (wr_vid=%s)" % page._cookie.get("wr_vid"))
-
-        save_path = os.path.join("cache", book_id)
         output_dir = "output"
-        if not os.path.isdir(output_dir):
-            os.mkdir(output_dir)
-        exporter = export.WeReadExporter(page, save_path)
-        while True:
-            try:
-                await page.launch(
-                    headless=args.headless,
-                    force_login=args.force_login,
-                    use_default_profile=args.use_default_profile,
-                    mock_user_agent=args.mock_user_agent,
-                    proxy_server=args.proxy_server,
-                    login_timeout=args.login_timeout,
-                )
-            except RuntimeError:
-                logging.exception("Launch book %s home page failed" % book_id)
-                await asyncio.sleep(2)
-                continue
-
-            try:
-                await exporter.export_markdown(args.load_timeout, args.load_interval)
-            except utils.LoadChapterFailedError:
-                logging.warning("Load chapter failed, close browser and retry")
-                await page.close()
-            else:
-                await page.close()
-                break
-
+        os.makedirs(output_dir, exist_ok=True)
         await exporter.pre_process_markdown()
         title = await exporter.get_book_title()
         title = utils.format_filename(title)
@@ -218,23 +167,25 @@ async def async_main():
 def main():
     if sys.platform == "win32":
         patch_windows()
-    patch_generateRequestHash()
     logging.root.level = logging.INFO
     handler = logging.StreamHandler()
     fmt = "[%(asctime)s][%(levelname)s]%(message)s"
     formatter = logging.Formatter(fmt)
     handler.setFormatter(formatter)
     logging.root.addHandler(handler)
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(async_main())
-    except:
-        import traceback
+    from . import utils
 
-        traceback.print_exc()
-        return
+    os.umask(0o077)
+    try:
+        return asyncio.run(async_main())
+    except (utils.BookAccessError, utils.LoginRequiredError, utils.ChromeNotInstalledError,
+            utils.LoadChapterFailedError, ValueError) as error:
+        logging.error("%s", error)
+        return 1
+    except Exception:
+        logging.exception("WeRead export failed")
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

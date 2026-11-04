@@ -59,6 +59,9 @@ Please export WeRead book 08232ac0720befa90825d88 in headless mode
 You can also use the tool directly without Claude Code:
 
 ```bash
+# Sign in from the project directory before the first CLI export
+python -m weread_exporter.login
+
 # Using the main exporter
 python -m weread_exporter -b <book_id> -o epub -o pdf
 
@@ -73,10 +76,10 @@ python -m weread_exporter -b 08232ac0720befa90825d88 -o epub --headless
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `book_id` | string | Yes | - | The WeRead book ID |
+| `book_id` | string | Yes | - | The WeRead book ID or official URL |
 | `formats` | array | No | ["epub", "pdf"] | Output format(s): epub, pdf, mobi, txt, md. Note: epub is auto-included when pdf is specified |
 | `headless` | boolean | No | false | Run chrome in headless mode |
-| `force_login` | boolean | No | **true** | Force login first (enabled by default for compatibility) |
+| `force_login` | boolean | No | automatic | Open QR sign-in in a visible browser when no session has been saved |
 | `load_timeout` | integer | No | 60 | Load chapter page timeout in seconds |
 | `load_interval` | integer | No | 30 | Load chapter page interval in seconds |
 

@@ -1,12 +1,17 @@
 import asyncio
+import io
 import json
 import logging
+import mimetypes
 import os
+import re
 import sys
+import tempfile
 import time
 
 import bs4
 import markdown
+from PIL import Image
 
 from ebooklib import epub
 from weasyprint import HTML, CSS
@@ -14,20 +19,51 @@ from weasyprint import HTML, CSS
 from . import utils
 
 current_path = os.path.dirname(os.path.abspath(__file__))
+_REMOTE_IMAGE = re.compile(r"!\[[^\]\n]*\]\((https?://[^)\n]+)\)")
+
+
+def _write_bytes(path, data):
+    with tempfile.NamedTemporaryFile(dir=os.path.dirname(path), delete=False) as file:
+        temporary = file.name
+        try:
+            file.write(data)
+            file.close()
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+
+async def _fetch_image(url):
+    status, headers, data = await utils.fetch(url, respond_with_headers=True)
+    if status != 200:
+        raise OSError(f"图片下载失败（HTTP {status}）。")
+    if headers.get("Content-Type", "").split(";")[0] == "image/svg+xml":
+        return data, ".svg"
+    with Image.open(io.BytesIO(data)) as image:
+        extension = {"JPEG": ".jpg", "PNG": ".png", "GIF": ".gif"}.get(image.format)
+        if extension:
+            image.verify()
+            return data, extension
+        result = io.BytesIO()
+        image.convert("RGBA").save(result, format="PNG")
+        return result.getvalue(), ".png"
 
 
 class WeReadExporter(object):
     def __init__(self, page, save_dir):
         self._page = page
         self._save_dir = save_dir
-        if not os.path.isdir(save_dir):
-            os.makedirs(save_dir)
+        os.makedirs(save_dir, exist_ok=True)
         self._meta_path = os.path.join(self._save_dir, "meta.json")
         self._chapter_dir = os.path.join(self._save_dir, "chapters")
         self._image_dir = os.path.join(self._save_dir, "images")
-        if not os.path.isdir(self._image_dir):
-            os.mkdir(self._image_dir)
-        self._cover_image_path = os.path.join(self._save_dir, "cover.jpg")
+        os.makedirs(self._image_dir, exist_ok=True)
+        self._cover_image_path = next((
+            os.path.join(self._save_dir, "cover" + ext)
+            for ext in (".jpg", ".png", ".gif", ".svg")
+            if os.path.isfile(os.path.join(self._save_dir, "cover" + ext))
+        ), None)
         self._meta_data = {}
         self._current_chapter = 0
 
@@ -44,8 +80,7 @@ class WeReadExporter(object):
 
         if not os.path.isfile(self._meta_path):
             self._meta_data = await self._page.get_book_info()
-            with open(self._meta_path, "w") as fp:
-                fp.write(json.dumps(self._meta_data))
+            _write_bytes(self._meta_path, json.dumps(self._meta_data).encode("utf-8"))
         else:
             with open(self._meta_path) as fp:
                 text = fp.read()
@@ -95,31 +130,16 @@ class WeReadExporter(object):
                 else:
                     output += line
             output += "\n"
-            pos = 0
-            while pos >= 0:
-                pos = output.find("](https://", pos)
-                if pos < 0:
-                    break
-                pos1 = output.find(")", pos)
-                url = output[pos + 2 : pos1]
-                logging.info("[%s] Replace image %s" % (self.__class__.__name__, url))
-                try:
-                    data = await utils.fetch(url)
-                except:
-                    logging.exception(
-                        "[%s] Fetch image data of %s failed"
-                        % (self.__class__.__name__, url)
-                    )
-                    pos += 10
-                else:
-                    image_name = utils.md5(url) + ".jpg"
-                    with open(os.path.join(self._image_dir, image_name), "wb") as fp:
-                        fp.write(data)
-                    output = output[: pos + 2] + "images/" + image_name + output[pos1:]
+            for match in reversed(list(_REMOTE_IMAGE.finditer(output))):
+                url = match.group(1)
+                data, extension = await _fetch_image(url)
+                image_name = utils.md5(url) + extension
+                _write_bytes(os.path.join(self._image_dir, image_name), data)
+                start, end = match.span(1)
+                output = output[:start] + "../images/" + image_name + output[end:]
             if not os.path.isfile(chapter_path + ".bak"):
-                os.rename(chapter_path, chapter_path + ".bak")
-            with open(chapter_path, "wb") as fp:
-                fp.write(output.encode())
+                _write_bytes(chapter_path + ".bak", text.encode("utf-8"))
+            _write_bytes(chapter_path, output.encode("utf-8"))
 
     async def markdown_to_txt(self, save_path):
         meta_data = await self._load_meta_data()
@@ -143,6 +163,7 @@ class WeReadExporter(object):
                 "markdown.extensions.attr_list",
             ],
         )
+        html = html.replace('src="../images/', 'src="images/')
         html += '<div class="page-break"></div>'
         if wrap:
             html = (
@@ -155,7 +176,8 @@ class WeReadExporter(object):
         self, save_path, extra_css=None, image_format="jpg", dump_html=False
     ):
         meta_data = await self._load_meta_data()
-        raw_html = '<img src="cover.jpg" style="width: 100%;">\n'
+        cover = os.path.basename(self._cover_image_path)
+        raw_html = f'<img src="{cover}" style="width: 100%;">\n'
         for index, chapter in enumerate(meta_data["chapters"]):
             chapter_path = self._make_chapter_path(index, chapter["id"])
             raw_html += self._markdown_to_html(chapter_path, wrap=False)
@@ -199,7 +221,7 @@ class WeReadExporter(object):
         # add cover image
         with open(self._cover_image_path, "rb") as fp:
             image_data = fp.read()
-            book.set_cover("cover.jpg", image_data)
+            book.set_cover(os.path.basename(self._cover_image_path), image_data)
         # define CSS style
         css_path = os.path.join(current_path, "epub.css")
         with open(css_path) as fp:
@@ -222,7 +244,7 @@ class WeReadExporter(object):
             chapter_path = self._make_chapter_path(index, chapter["id"])
             xhtml_name = "chap_%.4d.xhtml" % (index + 1)
             chap = epub.EpubHtml(
-                title=chapter["title"], file_name=xhtml_name, lang="hr"
+                title=chapter["title"], file_name=xhtml_name, lang="zh-CN"
             )
             html = self._markdown_to_html(chapter_path)
             chap.content = html.replace("code>", "epub-code>")
@@ -269,7 +291,7 @@ class WeReadExporter(object):
                 content = fp.read()
                 image = epub.EpubItem(
                     file_name="images/" + it,
-                    media_type="image/jpeg",
+                    media_type=mimetypes.guess_type(it)[0],
                     content=content,
                 )
                 book.add_item(image)
@@ -304,16 +326,20 @@ class WeReadExporter(object):
 
     async def save_cover_image(self):
         meta_data = await self._load_meta_data()
-        cover_url = meta_data["cover"].replace("/s_", "/t9_")
-        data = await utils.fetch(cover_url)
-        with open(self._cover_image_path, "wb") as fp:
-            fp.write(data)
+        cover_url = meta_data["cover"]
+        try:
+            data, extension = await _fetch_image(cover_url.replace("/s_", "/t9_"))
+        except OSError:
+            if "/s_" not in cover_url:
+                raise
+            data, extension = await _fetch_image(cover_url)
+        self._cover_image_path = os.path.join(self._save_dir, "cover" + extension)
+        _write_bytes(self._cover_image_path, data)
 
     async def export_markdown(self, timeout=60, interval=30):
-        if not os.path.isdir(self._chapter_dir):
-            os.makedirs(self._chapter_dir)
+        os.makedirs(self._chapter_dir, exist_ok=True)
         meta_data = await self._load_meta_data()
-        if not os.path.isfile(self._cover_image_path):
+        if not self._cover_image_path:
             await self.save_cover_image()
 
         # Track previous chapter content to detect infinite loops
@@ -356,12 +382,12 @@ class WeReadExporter(object):
                             time.time() - time0,
                         )
                     )
-                    raise utils.LoadChapterFailedError()
+                    raise utils.LoadChapterFailedError(f"章节「{chapter['title']}」加载超时。") from None
                 except KeyboardInterrupt as ex:
                     raise ex
-                except utils.LoginRequiredError:
+                except (utils.LoginRequiredError, utils.BookAccessError):
                     logging.warning(
-                        "[%s] Chapter %s requires login, re-authenticating..."
+                        "[%s] Chapter %s cannot be read in this session."
                         % (self.__class__.__name__, chapter["title"])
                     )
                     raise
@@ -401,7 +427,6 @@ class WeReadExporter(object):
                 "[%s] Export chapter %s to %s"
                 % (self.__class__.__name__, chapter["title"], file_path)
             )
-            with open(file_path, "wb") as fp:
-                fp.write(markdown.encode("utf-8", errors="replace"))
+            _write_bytes(file_path, markdown.encode("utf-8", errors="replace"))
 
             await asyncio.sleep(interval)

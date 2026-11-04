@@ -17,8 +17,8 @@ pip3 install -e .
 # Install the skill globally
 claude skill install .
 
-# Or specify the skill.md file directly
-claude skill install skill.md
+# Or specify the SKILL.md file directly
+claude skill install SKILL.md
 ```
 
 ### Method 2: Manual Installation
@@ -30,8 +30,9 @@ mkdir -p ~/.claude/skills
 # Copy the skill to the global skills directory
 cp -r . ~/.claude/skills/weread-exporter
 
-# Or just copy the skill.md file
-cp skill.md ~/.claude/skills/weread-exporter.md
+# Or install only the instructions after installing the Python package
+mkdir -p ~/.claude/skills/weread-exporter
+cp SKILL.md ~/.claude/skills/weread-exporter/SKILL.md
 ```
 
 ### Method 3: Symlink for Development
@@ -98,5 +99,4 @@ claude skill uninstall weread-exporter
 
 # Or manually remove
 rm -rf ~/.claude/skills/weread-exporter
-rm -f ~/.claude/skills/weread-exporter.md
 ```
