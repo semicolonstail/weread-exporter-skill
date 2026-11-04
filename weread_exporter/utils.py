@@ -13,6 +13,10 @@ class LoginRequiredError(RuntimeError):
     pass
 
 
+class BookAccessError(RuntimeError):
+    pass
+
+
 class LoadChapterFailedError(RuntimeError):
     pass
 
@@ -30,7 +34,7 @@ async def fetch(url, method="GET", headers=None, data=None, respond_with_headers
     headers = headers or {}
     headers.pop("sec-ch-ua", None)
     headers.pop("sec-ch-ua-platform", None)
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
         method = getattr(session, method.lower())
         if data and not isinstance(data, bytes):
             data = data.encode("utf-8")

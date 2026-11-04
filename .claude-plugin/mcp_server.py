@@ -70,7 +70,7 @@ async def handle_message(message):
                             "properties": {
                                 "book_id": {
                                     "type": "string",
-                                    "description": "The WeRead book ID (e.g., 08232ac0720befa90825d88)"
+                                    "description": "The WeRead book ID or official detail or reader URL"
                                 },
                                 "formats": {
                                     "type": "array",
@@ -88,8 +88,7 @@ async def handle_message(message):
                                 },
                                 "force_login": {
                                     "type": "boolean",
-                                    "description": "Force login first (default: true for better compatibility)",
-                                    "default": True
+                                    "description": "Open QR sign-in. By default, a visible browser prompts when there is no saved session."
                                 },
                                 "load_timeout": {
                                     "type": "integer",
@@ -169,13 +168,14 @@ async def export_weread_book(arguments):
     for fmt in formats:
         cmd_args.extend(["-o", fmt])
 
-    # Default to force_login for better compatibility
-    force_login = arguments.get("force_login", True)
+    headless = arguments.get("headless", False)
+    has_session_file = os.path.isfile(os.path.join(PROJECT_DIR, "cache", "cookie.txt"))
+    force_login = arguments.get("force_login", not headless and not has_session_file)
     if force_login:
         cmd_args.append("--force-login")
 
     # Optional parameters
-    if arguments.get("headless"):
+    if headless:
         cmd_args.append("--headless")
 
     if arguments.get("load_timeout"):

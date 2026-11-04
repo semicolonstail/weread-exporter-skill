@@ -13,7 +13,7 @@ import os
 import sys
 
 # Add project root to path
-PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_DIR)
 
 
@@ -49,14 +49,14 @@ def main():
         print("  /export-weread-book <book_id> [options]")
         print()
         print("Parameters:")
-        print("  book_id       (required)  The WeRead book ID")
+        print("  book_id       (required)  The WeRead book ID or official URL")
         print("                           Get it from: https://weread.qq.com/web/bookDetail/{id}")
         print()
         print("Options:")
         print("  formats       (optional)  Output format(s): epub, pdf, mobi, txt, md")
         print("                           Default: epub")
         print("  headless      (optional)  Run chrome in headless mode (default: false)")
-        print("  force_login   (optional)  Force login first (default: false)")
+        print("  force_login   (optional)  Open QR sign-in in a visible browser")
         print("  login_timeout (optional)  Login QR code timeout in seconds (default: 60)")
         print("  load_timeout  (optional)  Load chapter timeout in seconds (default: 60)")
         print("  load_interval (optional)  Load chapter interval in seconds (default: 30)")
@@ -94,13 +94,14 @@ def skill_main(input_data):
     for fmt in formats:
         cmd_args.extend(["-o", fmt])
 
-    # Default to force_login for better compatibility
-    force_login = input_data.get("force_login", True)
+    headless = input_data.get("headless", False)
+    has_session_file = os.path.isfile(os.path.join(PROJECT_DIR, "cache", "cookie.txt"))
+    force_login = input_data.get("force_login", not headless and not has_session_file)
     if force_login:
         cmd_args.append("--force-login")
 
     # Optional parameters
-    if input_data.get("headless"):
+    if headless:
         cmd_args.append("--headless")
 
     if input_data.get("load_timeout"):

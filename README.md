@@ -27,17 +27,15 @@
 
 ### 方式一：一键安装（推荐）
 
+从当前仓库的 Code 菜单复制克隆链接，克隆后进入仓库目录。
+
 **macOS / Linux:**
 ```bash
-git clone https://github.com/semicolonstail/weread-exporter-skill.git
-cd weread-exporter
 ./install.sh
 ```
 
 **Windows:**
 ```cmd
-git clone https://github.com/semicolonstail/weread-exporter-skill.git
-cd weread-exporter
 install.bat
 ```
 
@@ -54,56 +52,30 @@ pip3 install -e .
 
 ## 📖 使用方法
 
-### ⚠️ 重要：首次使用需要登录
+### 登录和导出
 
-**首次运行必须登录微信读书账号：**
+安装 Chrome 或 Chromium 后，在同一个目录中登录和导出。首次使用或会话过期时，运行登录命令，用手机微信扫描浏览器中的二维码并确认。
 
-1. 工具会自动打开 Chrome/Chromium 浏览器窗口
-2. 屏幕上会显示微信登录二维码
-3. 使用**微信手机 App** 扫描二维码进行登录
-4. 登录成功后，导出流程将自动开始
-5. 登录状态会被保存，后续导出无需再次登录
+```bash
+python -m weread_exporter.login
+python -m weread_exporter -b 'BOOK_URL_OR_ID' -o epub
+```
 
-如果未登录，导出将失败。请在看到二维码提示时完成登录。
+`-b` 接受微信读书官网的书籍详情页、阅读页链接或书籍 ID。只有书名时，可先在 [微信读书](https://weread.qq.com/) 搜索对应版本。
+
+登录后可用 `--headless` 在后台导出，或重复 `-o` 选择多种格式。
+
+```bash
+python -m weread_exporter --headless -b 'BOOK_URL_OR_ID' -o epub -o pdf
+```
+
+如需在导出命令中重新扫码，使用 `--force-login` 并保留可见的浏览器窗口。
 
 ### 在 Claude Code 中使用
 
 ```
 Export the WeRead book with ID 08232ac0720befa90825d88 to epub and pdf formats
 ```
-
-### 命令行使用
-
-```bash
-# ⚠️ 首次使用必须添加 --force-login 参数！
-python -m weread_exporter -b <book_id> -o epub -o pdf --force-login
-
-# 后续使用（已登录过，无需再登录）
-python -m weread_exporter -b <book_id> -o epub -o pdf
-
-# 无头模式（不显示浏览器）- 首次使用必须加 --force-login
-python -m weread_exporter -b <book_id> -o epub --headless --force-login
-
-# 自定义超时时间
-python -m weread_exporter -b <book_id> -o epub --load-timeout 120
-
-# 自定义登录超时时间（默认 60 秒）
-python -m weread_exporter -b <book_id> -o epub --login-timeout 120 --force-login
-```
-
-**⚠️ 重要提示：**
-- **首次使用必须添加 `--force-login` 参数**，否则无法登录
-- 首次运行会打开浏览器，显示微信登录二维码
-- 使用微信手机 App 扫码登录后，登录状态会被保存
-- 后续使用无需 `--force-login` 参数（除非缓存失效）
-
-### 获取书籍 ID
-
-1. 访问 https://weread.qq.com/
-2. 搜索目标书籍
-3. 打开书籍详情页
-4. URL 格式：`https://weread.qq.com/web/bookDetail/08232ac0720befa90825d88`
-5. 书籍 ID 就是 `/web/bookDetail/` 后面的部分（如 `08232ac0720befa90825d88`）
 
 ## 📦 输出格式说明
 
@@ -115,35 +87,16 @@ python -m weread_exporter -b <book_id> -o epub --login-timeout 120 --force-login
 | TXT | 纯文本格式 | 快速查看、文本分析 |
 | Markdown | Markdown 格式 | 二次编辑、转换 |
 
-导出的文件保存在 `./output/` 目录
-
-## 📌 注意事项
-
-- **⚠️ 首次使用必须添加 `--force-login` 参数**，否则无法触发登录流程
-- **登录要求**：首次运行会打开浏览器显示微信登录二维码，请使用微信手机 App 扫码登录
-- **浏览器要求**：需要安装 Chrome 或 Chromium 浏览器
-- **登录状态**：首次登录后会保存登录状态，后续使用无需 `--force-login` 参数
-- **付费章节**：如果书籍包含付费章节，工具会在遇到付费内容时自动停止并提示登录
-- **无限循环保护**：工具内置了多重检测机制，防止在免费章节末尾无限循环：
-  - 检测登录提示文字（"登录后阅读"、"请登录"等）
-  - 检测重复章节内容
-  - 限制单章最大页数（50页）
-- **无头模式**：服务器环境建议使用 `--headless` 参数（但首次使用时仍需添加 `--force-login`）
-- **大文件导出**：书籍页数较多时，导出时间会较长，请耐心等待
-- **格式限制**：导出 PDF 时会自动先生成 EPUB（转换需要）
+EPUB、PDF、MOBI 和 TXT 写入 `output/`。逐章 Markdown 保存在 `cache/web-reader/BOOK_ID/chapters/`。登录会话保存在当前目录的 `cache/cookie.txt`，请保留在本机。
 
 ## 🔧 实现原理
 
-通过 Hook Web 页面中的 Canvas 函数，获取绘制到 Canvas 中的文本及样式等信息，转换成 markdown 格式，保存到本地文件，然后再转换成最终的 EPUB 或 PDF 格式，而 MOBI 格式则是使用 kindlegen 工具从 EPUB 格式转换来的。
+导出器为 Chrome 创建独立的临时配置，按网页阅读器的目录逐章加载已获授权的内容，采集画布及页面渲染的文字和图片。遇到访问限制或章节加载失败时会停止。MOBI 由 Linux 上的 kindlegen 将 EPUB 转换得到。
 
 ## 🛠️ 开发
 
 ```bash
-# 克隆仓库
-git clone https://github.com/semicolonstail/weread-exporter-skill.git
-cd weread-exporter
-
-# 安装开发依赖
+# 在仓库根目录安装开发依赖
 pip3 install -e .
 
 # 运行测试
@@ -154,10 +107,10 @@ pytest
 
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
-| `-b, --book-id` | string | 是 | - | 微信读书书籍 ID |
-| `-o, --output` | string | 否 | epub, pdf | 输出格式：epub, pdf, mobi, txt, md |
+| `-b, --book-id` | string | 是 | - | 微信读书官网书籍链接或 ID |
+| `-o, --output-format` | string | 否 | epub | 支持 epub、pdf、mobi、txt、md，可重复指定 |
 | `--headless` | boolean | 否 | false | 无头模式运行 |
-| `--force-login` | boolean | **首次必填** | false | ⚠️ **首次使用必须添加此参数**，触发登录流程 |
+| `--force-login` | boolean | 否 | false | 打开可见浏览器重新扫码 |
 | `--login-timeout` | int | 否 | 60 | 登录超时时间（秒） |
 | `--load-timeout` | int | 否 | 60 | 加载超时时间（秒） |
 | `--load-interval` | int | 否 | 30 | 加载间隔时间（秒） |

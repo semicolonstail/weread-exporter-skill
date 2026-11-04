@@ -1,687 +1,341 @@
-"""
-WebRead WebPage
-"""
+"""Read the official WeRead site in a separate Chrome session."""
 
 import asyncio
+import html
 import json
-import logging
 import os
-import random
+from pathlib import Path
+import re
+import shutil
 import sys
-import time
-import urllib.parse
+import tempfile
+from urllib.parse import urlsplit
 
 import pyppeteer
 
 from . import utils
 
 
-class WeReadWebPage(object):
-    """WebRead WebPage"""
+_ROOT = "https://weread.qq.com"
+_STATE = re.compile(r"window\.__INITIAL_STATE__\s*=\s*")
+_LOGIN_CONTROL = """() => [...document.querySelectorAll(
+    'a.wr_index_page_top_section_header_action_link, button.navBar_link_Login'
+)].find(element => element.innerText.trim() === '登录' && element.getClientRects().length)"""
+_LOGIN_MODAL = ".wr_login_modal_wrapper"
+_QR_READY = """() => {
+    const modal = document.querySelector('.wr_login_modal_wrapper');
+    if (!modal?.getClientRects().length) return false;
+    const image = modal.querySelector('img.wr_login_modal_qr_img');
+    const frame = modal.querySelector('iframe[src]');
+    return Boolean((image?.complete && image.naturalWidth > 100) ||
+        (frame?.clientWidth > 100 && frame.clientHeight > 100 && frame.src.startsWith('https:')));
+}"""
+_READY = """(previous) => {
+    const view = window.wereadExportSnapshot?.();
+    if (!view) return false;
+    const marker = view.items.slice(0, 40).map(item => item.text).join('');
+    return view.access || (view.items.length && marker !== previous);
+}"""
 
-    root_url = "https://weread.qq.com"
-    window_size = (1920, 1080)
+
+def normalize_book_id(value):
+    """Accept a raw ID or an official book detail/reader URL."""
+    if "://" in value:
+        parsed = urlsplit(value)
+        match = re.fullmatch(r"/web/(?:bookDetail|reader)/([a-zA-Z0-9]+)(?:/)?", parsed.path)
+        if parsed.scheme != "https" or parsed.netloc != "weread.qq.com" or not match:
+            raise ValueError("请使用微信读书官网的书籍详情页或阅读页链接。")
+        value = match.group(1)
+    # The reader appends a hash of the chapter UID after the book ID.
+    value = value.split("k", 1)[0]
+    if value.isdecimal():
+        value = utils.wr_hash(value)
+    if not re.fullmatch(r"[0-9a-f]+(?:g[0-9a-f]+)*", value):
+        raise ValueError("无效的微信读书书籍 ID。")
+    return value
+
+
+class WeReadWebPage:
+    root_url = _ROOT
 
     def __init__(self, book_id, cookie_path=None, webcache_path=None):
         self._book_id = book_id
-        self._cookie_path = cookie_path
-        self._cookie = {}
-        self._webcache_path = webcache_path or "cache"
-        if not os.path.isdir(self._webcache_path):
-            os.makedirs(self._webcache_path)
-        self._home_url = "%s/web/bookDetail/%s" % (
-            self.__class__.root_url,
-            book_id,
-        )
-        self._chapter_root_url = self.__class__.root_url + "/web/reader/"
+        self._reader_url = f"{_ROOT}/web/reader/{book_id}"
+        self._cookie_path = Path(cookie_path or Path(webcache_path or "cache") / "cookie.txt")
+        self._cookie = self._load_cookie()
         self._browser = None
         self._page = None
-        self._load_cookie()
-        self._url = ""
+        self._book_info = None
+        self._markdown = None
 
-    async def get_book_info(self):
-        html = (await utils.fetch(self._home_url)).decode()
-        pos1 = html.find("window.__INITIAL_STATE__")
-        if pos1 <= 0:
-            raise RuntimeError("Unexpected html: %s" % self._html)
-        pos1 = html.find("=", pos1)
-        pos2 = html.find("};", pos1)
-        data = html[pos1 + 1 : pos2 + 1].strip()
-        data = json.loads(data)
-        book_info = {}
-        book_info["title"] = data["reader"]["bookInfo"]["title"]
-        book_info["author"] = data["reader"]["bookInfo"]["author"]
-        book_info["cover"] = data["reader"]["bookInfo"]["cover"]
-        book_info["intro"] = data["reader"]["bookInfo"]["intro"]
-        book_info["chapters"] = []
-        for chapter in data["reader"]["chapterInfos"]:
-            chap = {
-                "id": chapter["chapterUid"],
-                "title": chapter["title"],
-                "level": chapter["level"],
-                "words": chapter["wordCount"],
-                "anchors": [],
-            }
-            if chapter["anchors"]:
-                for it in chapter["anchors"]:
-                    chap["anchors"].append({"title": it["title"], "level": it["level"]})
-            book_info["chapters"].append(chap)
-        return book_info
+    @staticmethod
+    def _check_chrome():
+        for name in ("chrome", "google-chrome", "chromium"):
+            executable = shutil.which(name)
+            if executable:
+                return executable
+        if sys.platform == "darwin":
+            path = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+            if path.is_file():
+                return str(path)
+        raise utils.ChromeNotInstalledError("请安装 Google Chrome，或将 Chrome 加入 PATH。")
 
-    async def get_user_info(self):
-        vid = self._cookie.get("wr_vid")
-        if not vid:
-            raise utils.InvalidUserError("Invalid cookie: %s" % self._format_cookie())
-        url = "%s/web/user?userVid=%s" % (self.__class__.root_url, vid)
-        headers = {"Referer": self.__class__.root_url, "Cookie": self._format_cookie()}
-        rsp = await utils.fetch(url, headers=headers)
-        rsp = json.loads(rsp.decode())
-        if rsp.get("errCode") == -2012:
-            _, rsp_headers, _ = await utils.fetch(
-                self.__class__.root_url, headers=headers, respond_with_headers=True
-            )
-            for it in rsp_headers.getall("Set-Cookie", []):
-                cookie = it.split("; ")[0]
-                if "=" not in cookie:
-                    logging.warning(
-                        "[%s] Ignore invalid cookie: %s"
-                        % (self.__class__.__name__, cookie)
-                    )
-                    continue
-                key, value = cookie.split("=", 1)
-                self._cookie[key] = value
-                logging.info(
-                    "[%s] Update cookie %s" % (self.__class__.__name__, cookie)
-                )
-            self._save_cookie()
-            headers["Cookie"] = self._format_cookie()
-            rsp = await utils.fetch(url, headers=headers)
-            rsp = json.loads(rsp.decode())
-        elif rsp.get("errCode") == -2010:
-            # 用户不存在
-            raise utils.InvalidUserError("User %s not found" % vid)
-        elif rsp.get("errCode"):
-            raise RuntimeError("Get user info failed: %s" % rsp)
-        return rsp
+    @property
+    def has_session(self):
+        return bool(self._cookie.get("wr_vid") not in (None, "", "0") and self._cookie.get("wr_skey"))
 
     def _load_cookie(self):
-        self._cookie = {}
-        if not os.path.isfile(self._cookie_path):
-            return
-        with open(self._cookie_path) as fp:
-            cookie = fp.read()
-            try:
-                cookie = json.loads(cookie)
-            except:
-                for it in cookie.split(";"):
-                    it = it.strip()
-                    if "=" not in it:
-                        continue
-                    key, value = it.split("=")
-                    self._cookie[key] = value
-            else:
-                for key in cookie:
-                    self._cookie[key] = cookie[key]
+        if not self._cookie_path.is_file():
+            return {}
+        text = self._cookie_path.read_text(encoding="utf-8")
+        try:
+            result = json.loads(text)
+        except json.JSONDecodeError:
+            result = dict(field.strip().split("=", 1) for field in text.split(";") if "=" in field)
+        if not isinstance(result, dict):
+            return {}
+        return {key: value for key, value in result.items() if isinstance(value, str)}
 
     def _save_cookie(self):
-        if not self._cookie_path:
-            return
-        with open(self._cookie_path, "w") as fp:
-            fp.write(json.dumps(self._cookie))
+        self._cookie_path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w", dir=self._cookie_path.parent, encoding="utf-8", delete=False
+        ) as file:
+            temp_path = Path(file.name)
+            try:
+                json.dump(self._cookie, file)
+                file.close()
+                temp_path.replace(self._cookie_path)
+            finally:
+                if temp_path.exists():
+                    temp_path.unlink()
 
-    def _format_cookie(self, cookie=""):
-        cookies = []
-        if cookie:
-            cookies.append(cookie)
-        for key in self._cookie:
-            cookies.append("%s=%s" % (key, self._cookie[key]))
-        return "; ".join(cookies)
+    async def launch(self, headless=False, force_login=False, mock_user_agent=False,
+                     proxy_server=None, login_timeout=60):
+        if force_login and headless:
+            raise ValueError("扫码登录需要可见的 Chrome 窗口。")
+        if not force_login and not self.has_session:
+            raise utils.LoginRequiredError("缺少登录记录，请先运行 python -m weread_exporter.login。")
 
-    async def _read_cookie(self):
-        cookies = await self._page.cookies()
-        cookie_map = {}
-        for cookie in cookies:
-            cookie_map[cookie["name"]] = cookie["value"]
-        return cookie_map
-
-    async def _update_cookie(self):
-        self._cookie = await self._read_cookie()
-
-    async def check_valid(self):
-        html = await utils.fetch(self._home_url)
-        if b'"soldout":1' in html:
-            return False
-        return True
-
-    def _check_chrome(self):
-        path_list = os.environ["PATH"].split(";" if sys.platform == "win32" else ":")
-        for chrome in ("chrome", "google-chrome"):
-            if sys.platform == "win32":
-                chrome += ".exe"
-            for path in path_list:
-                if os.path.isfile(os.path.join(path, chrome)):
-                    return chrome
-
-        if sys.platform == "darwin":
-            chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-            if os.path.isfile(chrome):
-                return chrome
-
-        if sys.platform == "win32":
-            command = "where chrome"
-        else:
-            command = "which chrome"
-        raise utils.ChromeNotInstalledError(
-            "Please make sure `chrome` is installed, and the install path is added to PATH environment. \nYou can test that with `%s` command."
-            % command
-        )
-
-    async def launch(
-        self,
-        headless=False,
-        force_login=False,
-        use_default_profile=False,
-        mock_user_agent=False,
-        proxy_server=None,
-        login_timeout=60,
-    ):
-        logging.info("[%s] Launch url %s" % (self.__class__.__name__, self._home_url))
         chrome = self._check_chrome()
-        args = ["--no-first-run", "--remote-allow-origins=*"]
-        if headless:
-            args.append("--headless")
-            if sys.platform == "linux" and os.getuid() == 0:
-                args.append("--no-sandbox")
-        if use_default_profile:
-            args.append("--user-data-dir")
-        else:
-            args.append("--window-size=%d,%d" % self.__class__.window_size)
-        if mock_user_agent:
-            args.append('--user-agent="%s"' % utils.generate_user_agent())
+        args = ["--window-size=1440,1000"]
         if proxy_server:
-            args.append("--proxy-server=%s" % proxy_server)
-        args.append("about:blank")
-        logging.info(
-            "[%s] Chrome args: chrome %s" % (self.__class__.__name__, " ".join(args))
-        )
+            args.append(f"--proxy-server={proxy_server}")
+        if sys.platform == "linux" and os.getuid() == 0:
+            args.append("--no-sandbox")
+
         self._browser = await pyppeteer.launch(
-            executablePath=chrome,
-            ignoreDefaultArgs=True,
-            args=args,
-            defaultViewport=None,
-            logLevel=logging.INFO,
+            executablePath=chrome, headless=headless, args=args,
+            defaultViewport={"width": 1440, "height": 1000},
+            autoClose=False, handleSIGINT=False, handleSIGTERM=False, handleSIGHUP=False,
         )
         self._page = (await self._browser.pages())[0]
-        await self._page.evaluateOnNewDocument(
-            """() => {
-            if (navigator.webdriver) {
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => {
-                        console.log('navigator.webdriver is called');
-                        console.trace();
-                        return undefined;
-                    }
-                });
-                var _hasOwnProperty = Object.prototype.hasOwnProperty;
-                Object.prototype.hasOwnProperty = function (key) {
-                    if (key === 'webdriver') {
-                        console.log('hasOwnProperty', key, 'is called');
-                        console.trace();
-                        return false;
-                    }
-                    return _hasOwnProperty.call(this, key);
-                };
-                const originalQuery = navigator.permissions.query;
-                navigator.permissions.query = (parameters) => (
-                    parameters.name === 'notifications' ?
-                    Promise.resolve({ state: Notification.permission }) :
-                    originalQuery(parameters)
-                );
-            }
-            if (navigator.plugins.length === 0) {
-                Object.defineProperty(navigator, 'plugins', {
-                    get: () => [1, 2, 3, 4, 5],
-                });
-                Object.defineProperty(window, 'PluginArray', {
-                    get: () => Array,
-                });
-            }
-            if (navigator.languages.length === 0) {
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['en-US', 'en'],
-                });
-            }
-            window.chrome = window.chrome || {
-                runtime: {},
-            };
-        }
-        """
-        )
-
-        await self._page.setViewport(
-            {
-                "width": 0,
-                "height": 0,
-                "deviceScaleFactor": 0.3,
-            }
-        )
-        if self._cookie.get("wr_vid"):
-            try:
-                user_info = await self.get_user_info()
-            except utils.InvalidUserError as ex:
-                logging.warning(
-                    "[%s] Get user error: %s" % (self.__class__.__name__, ex)
-                )
-                self._cookie = {}
-            else:
-                logging.info(
-                    "[%s] Current login user is %s"
-                    % (self.__class__.__name__, user_info.get("name", "Anonymous"))
-                )
-        if self._cookie:
-            await self._inject_cookie()
-
-        await self._page.goto(self._home_url)
-        # await self.wait_for_selector("div.readerFooter a")
+        if mock_user_agent:
+            await self._page.setUserAgent(utils.generate_user_agent())
         if force_login:
             await self.login(timeout=login_timeout)
-        if self._cookie:
-            await self.wait_for_avatar()
-        self._page.on("console", self.handle_log)
+        else:
+            await self._page.setCookie(*[
+                {"url": _ROOT, "name": name, "value": value, "secure": True}
+                for name, value in self._cookie.items()
+            ])
+        if self._book_id:
+            await self._page.setCookie({
+                "url": _ROOT, "name": "wr_useHorizonReader", "value": "0", "secure": True,
+            })
+            hook = Path(__file__).with_name("hook.js").read_text(encoding="utf-8")
+            await self._page.evaluateOnNewDocument(hook)
+            self._book_info = await self._read_book_info()
 
     async def close(self):
-        if self._browser:
-            await self._browser.close()
+        try:
+            if self._browser:
+                await self._browser.close()
+        finally:
             self._browser = self._page = None
 
-    async def get_html(self):
-        return await self._page.evaluate("document.documentElement.outerHTML;")
-
-    async def screenshot(self, save_path):
-        await self._page.screenshot({"path": save_path})
-
-    async def wait_for_selector(self, selector, timeout=30):
-        try:
-            return await self._page.waitForSelector(selector, timeout=timeout)
-        except pyppeteer.errors.TimeoutError as ex:
-            html = await self.get_html()
-            html_path = "webpage.html"
-            with open(html_path, "wb") as fp:
-                if not isinstance(html, bytes):
-                    html = html.encode("utf8")
-                fp.write(html)
-            logging.info(
-                "[%s] Current html saved to %s" % (self.__class__.__name__, html_path)
-            )
-            screenshot_path = "screenshot.jpg"
-            await self.screenshot(screenshot_path)
-            logging.info(
-                "[%s] Current screenshot saved to %s"
-                % (self.__class__.__name__, screenshot_path)
-            )
-            raise ex
-
-    def handle_log(self, message):
-        with open("%s.log" % self._book_id, "a+", encoding="utf-8") as fp:
-            fp.write("[%s] %s\n" % (self._url, message.text))
-
-    async def wait_for_avatar(self, timeout=30):
-        time0 = time.time()
-        while time.time() - time0 < timeout:
-            avatar_url = await self._page.evaluate(
-                "document.querySelector('img.wr_avatar_img') && document.querySelector('img.wr_avatar_img').getAttribute('src');"
-            )
-            if avatar_url is None or not avatar_url.endswith("Default.svg"):
-                break
-            await asyncio.sleep(5)
-        else:
-            raise RuntimeError("Wait for avatar timeout")
-
-    async def _inject_cookie(self):
-        for key in self._cookie:
-            logging.info(
-                "[%s] Inject cookie %s=%s"
-                % (self.__class__.__name__, key, self._cookie[key])
-            )
-            await self._page.setCookie(
-                {
-                    "url": self.__class__.root_url,
-                    "name": key,
-                    "value": self._cookie[key],
-                    "secure": True,
-                }
-            )
-
     async def login(self, timeout=60):
-        selectors = [
-            "button.navBar_link_Login",
-            "div.readerTopBar_right button.actionItem",
-        ]
-        for selector in selectors:
-            script = (
-                "var elem = document.querySelector('%s'); elem && elem.innerText"
-                % (selector)
-            )
-            result = await self._page.evaluate(script)
-            if not result:
-                continue
-            if "登录" not in result:
-                continue
-            await self._page.click(selector)
-            script = "document.querySelector('div.menu_container img.wr_avatar_img')"
-            time0 = time.time()
+        await self._page.goto(_ROOT, waitUntil="domcontentloaded", timeout=45000)
+        await self._page.bringToFront()
+        # The server-rendered link can appear before the page binds its click handler.
+        for attempt in range(3):
+            control = await self._page.waitForFunction(_LOGIN_CONTROL, {"timeout": 15000})
+            try:
+                await control.asElement().click()
+            finally:
+                await control.dispose()
+            try:
+                await self._page.waitForSelector(_LOGIN_MODAL, {"visible": True, "timeout": 4000})
+                break
+            except pyppeteer.errors.TimeoutError:
+                if attempt == 2:
+                    raise RuntimeError("微信读书登录窗口未打开。") from None
+        try:
+            await self._page.waitForFunction(_QR_READY, {"timeout": 25000})
+        except pyppeteer.errors.TimeoutError:
+            raise RuntimeError("微信读书登录窗口已打开，但二维码未加载。") from None
+        print("微信读书登录二维码已显示，请使用手机微信扫码并确认。", flush=True)
 
-            # Better user prompt for login
-            print("\n" + "=" * 60)
-            print("📱 WeChat Login Required")
-            print("=" * 60)
-            print("1. A QR code is displayed in the browser window")
-            print("2. Open WeChat on your mobile phone")
-            print("3. Scan the QR code to log in")
-            print("4. Waiting for you to scan...")
-            print(f"⏱️  Timeout: {timeout} seconds")
-            print("=" * 60 + "\n")
-
-            while time.time() - time0 < timeout:
-                elapsed = int(time.time() - time0)
-                remaining = timeout - elapsed
-                if elapsed % 10 == 0 and elapsed > 0:
-                    logging.info(
-                        "[%s] Waiting for login... (%d seconds remaining)"
-                        % (self.__class__.__name__, remaining)
-                    )
-                await asyncio.sleep(1)
-                result = await self._page.evaluate(script)
-                if not result:
-                    continue
-                logging.info("[%s] Login success!" % self.__class__.__name__)
-                print("\n✅ Login successful! Continuing export...\n")
-                await self._update_cookie()
+        deadline = asyncio.get_running_loop().time() + timeout
+        while asyncio.get_running_loop().time() < deadline:
+            cookies = {item["name"]: item["value"] for item in await self._page.cookies(_ROOT)}
+            if cookies.get("wr_vid") not in (None, "", "0") and cookies.get("wr_skey"):
+                self._cookie = cookies
                 self._save_cookie()
-                return True
-            else:
-                print("\n" + "=" * 60)
-                print("❌ Login Timeout")
-                print("=" * 60)
-                print(f"The login process timed out after {timeout} seconds.")
-                print("Please:")
-                print("  1. Check if the browser window is visible")
-                print("  2. Make sure you have WeChat installed on your phone")
-                print("  3. Try again with a longer timeout: --login-timeout 120")
-                print("=" * 60 + "\n")
-                raise RuntimeError(f"Login timeout after {timeout} seconds")
-        return False
+                print("微信读书已登录，登录状态已保存。", flush=True)
+                return
+            await asyncio.sleep(1)
+        raise utils.LoginRequiredError("微信读书扫码登录已超时。")
 
-    async def _get_from_cache_or_server(self, url, headers=None):
-        u = urllib.parse.urlparse(url)
-        path = os.path.join(
-            self._webcache_path, "resources", u.path[1:].replace("/", os.sep)
-        )
-        if os.path.isfile(path):
-            with open(path, "rb") as fp:
-                return 200, {}, fp.read()
+    async def _open_reader(self, url, timeout):
+        response = await self._page.goto(url, waitUntil="domcontentloaded", timeout=timeout * 1000)
+        if response is None:
+            # The reader can change its URL in place while a new navigation starts.
+            await self._page.goto("about:blank")
+            response = await self._page.goto(url, waitUntil="domcontentloaded", timeout=timeout * 1000)
+        if not response or not response.ok:
+            status = response.status if response else "无响应"
+            raise RuntimeError(f"微信读书阅读页加载失败（HTTP {status}）。")
+        document = await response.text()
+        match = _STATE.search(document)
+        if not match:
+            raise RuntimeError("阅读页未提供书籍数据，请检查网页是否正常打开。")
+        state, _ = json.JSONDecoder().raw_decode(document, match.end())
+        if not str((state.get("user") or {}).get("vid") or "").strip("0"):
+            raise utils.LoginRequiredError("微信读书会话已过期，请先重新扫码登录。")
+        return state.get("reader") or {}
 
-        dirpath = os.path.dirname(path)
-        if not os.path.isdir(dirpath):
-            os.makedirs(dirpath)
-        status, headers, body = await utils.fetch(
-            url, headers=headers, respond_with_headers=True
-        )
-        if status == 200:
-            with open(path, "wb") as fp:
-                fp.write(body)
-        return status, headers, body
-
-    def _handle_request_headers(self, url, headers):
-        for key in ("baggage", "sentry-trace"):
-            headers.pop(key, None)
-        cookie = ""
-        if "/web/reader/" in url:
-            cookie = "wr_useHorizonReader=0"
-        headers["cookie"] = self._format_cookie(cookie)
-        return headers
-
-    def _handle_response_headers(self, url, headers):
-        if "oss.weread.qq.com" in url:
-            headers["Access-Control-Allow-Origin"] = "*"
-            headers["Access-Control-Request-Method"] = "*"
-            headers["Access-Control-Allow-Headers"] = "*"
-        return headers
-
-    def _handle_http_body(self, url, body):
-        if url.startswith(self._chapter_root_url):
-            inject_script = (
-                "<script src='https://cdn.weread.qq.com/web/1.392ec47a.js'></script>\n"
-            )
-            return body.replace(b"</head>", inject_script.encode() + b"</head>")
-        return body
-
-    async def _handle_request(self, request):
-        if request.url.startswith("chrome-extension://"):
-            return await request.continue_()
-
-        if "/web/1.392ec47a.js" in request.url:
-            with open(
-                os.path.join(os.path.dirname(os.path.abspath(__file__)), "hook.js"),
-                "rb",
-            ) as fp:
-                hook_script = fp.read()
-                response = {
-                    "status": 200,
-                    "headers": {"Content-Type": "application/json"},
-                    "body": hook_script,
-                }
-                return await request.respond(response)
-
-        urlobj = urllib.parse.urlparse(request.url)
-        is_resource_file = urlobj.path.endswith(
-            (".js", ".css", ".jpg", ".png", ".gif", ".svg")
-        )
-        status = 200
-        headers = {
-            "Server": "nginx/1.20.2",
+    async def _read_book_info(self):
+        reader = await self._open_reader(self._reader_url, timeout=45)
+        info = reader.get("bookInfo") or {}
+        chapters = reader.get("chapterInfos") or []
+        if not info.get("title") or not chapters:
+            raise utils.BookAccessError("微信读书未提供可读目录，请在浏览器中确认该书的网页阅读权限。")
+        return {
+            "title": info["title"],
+            "author": info.get("author") or "",
+            "cover": info.get("cover") or "",
+            "intro": info.get("intro") or "",
+            "chapters": [{
+                "id": chapter["chapterUid"],
+                "title": chapter.get("title") or info["title"],
+                "level": max(chapter.get("level") or 1, 1),
+                "words": chapter.get("wordCount") or 0,
+                "anchors": chapter.get("anchors") or [],
+            } for chapter in chapters],
         }
-        body = b""
-        if request.method == "OPTIONS":
-            headers = {
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Request-Method": "*",
-                "Access-Control-Allow-Headers": "*",
-            }
-        elif request.method == "GET" and is_resource_file:
-            status, headers, body = await self._get_from_cache_or_server(request.url)
-        elif "/web/book/read" in request.url:
-            body = b'{"succ":1,"synckey":%d}' % random.randint(10000000, 100000000)
-            headers["Content-Type"] = "application/json; charset=utf-8"
-            headers["Content-Length"] = str(len(body))
-            logging.info(
-                "[%s][%s] Url %s return mock data"
-                % (self.__class__.__name__, request.method, request.url)
-            )
-        elif "sentry_key=" in request.url:
-            status = 200
-            headers["Content-Type"] = "application/json; charset=utf-8"
-            headers["Content-Length"] = str(len(body))
-            body = b"{}"
-            logging.info(
-                "[%s][%s] Url %s return mock data"
-                % (self.__class__.__name__, request.method, request.url)
-            )
-        elif "/hera/logkv" in request.url or "/hera/osslog" in request.url:
-            status = 204
-        elif "/hera/chlog" in request.url:
-            body = b'{"ret":0}'
-            headers["Content-Type"] = "application/json; charset=utf-8"
-            headers["Content-Length"] = str(len(body))
-            logging.info(
-                "[%s][%s] Url %s return mock data"
-                % (self.__class__.__name__, request.method, request.url)
-            )
-        elif "hijack_csp_report" in request.url:
-            return
-        elif "/river/single" in request.url:
-            body = b'{"err_code":0,"msg":"suc"}'
-            headers["Content-Type"] = "application/json; charset=utf-8"
-            headers["Content-Length"] = len(body)
-            logging.info(
-                "[%s][%s] Url %s return mock data"
-                % (self.__class__.__name__, request.method, request.url)
-            )
-        else:
-            logging.info(
-                "[%s][%s] Fetch url %s"
-                % (self.__class__.__name__, request.method, request.url)
-            )
-            headers = self._handle_request_headers(request.url, request.headers)
-            time0 = time.time()
-            status, headers, body = await utils.fetch(
-                request.url,
-                method=request.method,
-                headers=headers,
-                data=request.postData,
-                respond_with_headers=True,
-            )
-            headers = dict(headers)
-            logging.info(
-                "[%s][%s][%.2f] Url %s return %d, body len is %d"
-                % (
-                    self.__class__.__name__,
-                    request.method,
-                    time.time() - time0,
-                    request.url,
-                    status,
-                    len(body),
-                )
-            )
-            if "Content-Security-Policy" in headers:
-                logging.info(
-                    "[%s][%s] Url %s has Content-Security-Policy: %s"
-                    % (
-                        self.__class__.__name__,
-                        request.method,
-                        request.url,
-                        headers["Content-Security-Policy"],
-                    )
-                )
-                headers.pop("Content-Security-Policy")
 
-        headers = self._handle_response_headers(request.url, headers)
-        response = {
-            "status": status,
-            "headers": headers,
-            "body": self._handle_http_body(request.url, body),
-        }
-        return await request.respond(response)
+    async def get_book_info(self):
+        return self._book_info
 
-    def handle_request(self, request):
-        asyncio.ensure_future(self._handle_request(request))
+    async def _snapshot(self):
+        view = await self._page.evaluate("window.wereadExportSnapshot()")
+        if view.get("access"):
+            if "登录" in view["access"]:
+                raise utils.LoginRequiredError("阅读页要求登录，请重新扫码。")
+            raise utils.BookAccessError(f"阅读页提示「{view['access']}」，导出已停止。")
+        return view
 
-    async def pre_load_page(self):
-        await self._page.setRequestInterception(True)
-        self._page.on("request", self.handle_request)
+    async def _read_section(self, timeout, previous=None):
+        await self._page.waitForFunction(_READY, {"timeout": timeout * 1000}, previous)
+        await self._page.evaluate("window.scrollTo({top: 0, behavior: 'instant'})")
+        await asyncio.sleep(0.25)
+        items = {}
+        for _ in range(500):
+            view = await self._snapshot()
+            for item in view["items"]:
+                key = (item["layer"], item.get("id") or (
+                    item["kind"], round(item["x"]), round(item["y"]), item["text"],
+                ))
+                items[key] = item
+            if view["height"] - view["top"] - view["viewport"] <= 2:
+                return view, items.values()
+            await self._page.evaluate(
+                "(top) => window.scrollTo({top, behavior: 'instant'})",
+                view["top"] + round(view["viewport"] * 0.7),
+            )
+            await asyncio.sleep(0.25)
+        raise utils.LoadChapterFailedError("滚动到章节底部超时。")
+
+    async def goto_chapter(self, chapter_id, timeout=60):
+        self._markdown = None
+        url = self._reader_url + "k" + utils.wr_hash(str(chapter_id))
+        reader = await self._open_reader(url, timeout=timeout)
+        chapter = reader.get("currentChapter") or {}
+        if str(chapter.get("chapterUid")) != str(chapter_id):
+            raise utils.BookAccessError(f"阅读器未打开请求的章节 {chapter_id}。")
+        sections = []
+        previous = None
+        for _ in range(50):
+            view, items = await self._read_section(timeout, previous)
+            markdown = self._format_section(items)
+            if not markdown.strip() or markdown in sections:
+                raise utils.LoadChapterFailedError(f"章节 {chapter_id} 的正文为空或页面重复。")
+            sections.append(markdown)
+            if not view["next"]:
+                title = chapter.get("title") or self._book_info["title"]
+                text = "\n\n".join(sections)
+                first_line, _, rest = text.partition("\n")
+                if "".join(html.unescape(first_line).split()) == "".join(title.split()):
+                    text = rest.lstrip("\n")
+                self._markdown = f"## {html.escape(title, quote=False)}\n\n{text}"
+                return
+            previous = "".join(item["text"] or "" for item in view["items"][:40])
+            await self._page.click(".readerFooter .readerFooter_button")
+        raise utils.LoadChapterFailedError(f"章节 {chapter_id} 超过分页上限。")
 
     async def get_markdown(self):
-        script = "canvasContextHandler.data.complete;"
-        time0 = time.time()
-        while time.time() - time0 < 10:
-            result = await self._page.evaluate(script)
-            if result:
-                break
-            await asyncio.sleep(1)
-        script = "canvasContextHandler.data.markdown;"
-        result = await self._page.evaluate(script)
-        if not result:
-            await self._page.evaluate("canvasContextHandler.updateMarkdown();")
-            result = await self._page.evaluate(script)
-            if not result:
-                raise RuntimeError("Wait for creating markdown timeout")
+        if not self._markdown:
+            raise utils.LoadChapterFailedError("阅读页未提供可导出的正文。")
+        return self._markdown
 
-        # Check if content indicates login is required
-        if not result or len(result.strip()) < 10:
-            raise utils.LoginRequiredError("Empty content - login required")
-
-        # Check for common login/permission prompts in Chinese
-        login_prompts = [
-            "登录后阅读",
-            "请登录",
-            "登录后查看",
-            "购买后阅读",
-            "订阅后阅读",
-            "本章为付费章节",
-            "试读结束",
-        ]
-        for prompt in login_prompts:
-            if prompt in result:
-                logging.warning(
-                    "[%s] Detected login prompt in content: %s"
-                    % (self.__class__.__name__, prompt)
-                )
-                raise utils.LoginRequiredError(f"Content contains login prompt: {prompt}")
-
-        return result
-
-    async def _check_next_page(self):
-        # Track consecutive pages to detect infinite loops
-        consecutive_next_page = 0
-        max_consecutive_pages = 50  # Safety limit
-
-        while True:
-            try:
-                await self.wait_for_selector(
-                    "button.readerFooter_button", timeout=60000
-                )
-            except pyppeteer.errors.TimeoutError:
-                logging.info("[%s] load selector timeout " % self.__class__.__name__)
-                break
-            result = await self._page.evaluate(
-                "document.getElementsByClassName('readerFooter_button')[0].innerText;"
-            )
-
-            # Check for login prompts in button text
-            if result.startswith("登录"):
-                raise utils.LoginRequiredError()
-
-            # Check for purchase/subscription prompts
-            if any(keyword in result for keyword in ["购买", "订阅", "付费", "会员"]):
-                raise utils.LoginRequiredError(f"Chapter requires purchase/subscription: {result}")
-
-            if result == "下一页":
-                consecutive_next_page += 1
-                if consecutive_next_page > max_consecutive_pages:
-                    raise utils.LoginRequiredError(
-                        f"Exceeded maximum page count ({max_consecutive_pages}) - "
-                        "likely stuck in a loop or hitting paywall"
-                    )
-                logging.info("[%s] Go to next page" % self.__class__.__name__)
-                await self._page.evaluate(
-                    r"canvasContextHandler.data.markdown += '\n\n';"
-                )
-                await self.pre_load_page()
-                await self._page.click("button.readerFooter_button")
-                await asyncio.sleep(1)
-            elif result == "下一章":
-                break
+    @staticmethod
+    def _format_section(items):
+        # Overlay text and canvas text can briefly coexist as the viewport moves.
+        ordered = sorted(items, key=lambda item: (item["y"], item["x"]))
+        rows = []
+        for item in ordered:
+            kind = item["kind"]
+            if kind != "text":
+                rows.append([item])
+            elif rows and rows[-1][0]["kind"] == "text" and item["y"] - rows[-1][0]["y"] < 7:
+                rows[-1].append(item)
             else:
-                raise NotImplementedError(result)
+                rows.append([item])
 
-    def _get_chapter_url(self, chapter_id):
-        return "%s%sk%s" % (
-            self._chapter_root_url,
-            self._book_id,
-            utils.wr_hash(str(chapter_id)),
-        )
-
-    async def goto_chapter(self, chapter_id, timeout=120):
-        logging.info("[%s] Go to chapter %s" % (self.__class__.__name__, chapter_id))
-        # await self.clear_cache()
-        await self.pre_load_page()
-        self._url = self._get_chapter_url(chapter_id)
-        await self._page.goto(self._url, timeout=1000 * timeout)
-        try:
-            await self._check_next_page()
-        except utils.LoginRequiredError:
-            await self.login(timeout=60)
-            return await self.goto_chapter(chapter_id, timeout=timeout)
-
-    async def clear_cache(self):
-        await self._page.evaluate("canvasContextHandler.clearCanvasCache();")
+        output = []
+        previous = None
+        for row in rows:
+            row.sort(key=lambda item: (item["x"], item["layer"] != "dom"))
+            first = row[0]
+            if first["kind"] == "text":
+                parts = []
+                last = None
+                for item in row:
+                    if last and abs(item["x"] - last["x"]) < 3 and item["text"] == last["text"]:
+                        continue
+                    parts.append(item["text"] or "")
+                    last = item
+                text = "".join(parts).strip()
+                if not text:
+                    continue
+                text = html.escape(text, quote=False)
+                if previous is None or first["y"] - previous["y"] > first["size"] * 2.1 or (
+                    first["x"] - previous["x"] > first["size"]
+                ):
+                    output.append("")
+                elif output and re.search(r"[A-Za-z0-9]$", output[-1]) and re.match(r"[A-Za-z0-9]", text):
+                    output[-1] += " "
+                output.append(text)
+                previous = first
+            else:
+                value = first["text"] or ""
+                if first["kind"] == "image":
+                    text = "![](" + value.replace("(", "%28").replace(")", "%29") + ")"
+                elif first["kind"] == "code":
+                    text = "```\n" + value.rstrip() + "\n```"
+                else:
+                    text = "------"
+                output.extend(("", text, ""))
+                previous = None
+        return "\n".join(output).strip()
